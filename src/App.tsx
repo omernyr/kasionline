@@ -31,6 +31,7 @@ function App() {
   const [error, setError] = useState('');
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingError, setLoadingError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [showAddForm, setShowAddForm] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
@@ -52,9 +53,45 @@ function App() {
   const ADMIN_USERNAME = 'kasi0101';
   const ADMIN_PASSWORD = 'kasi0147';
 
+  // Internet bağlantısı kontrolü
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
   // Firestore'dan ilk sayfa ürünleri yükleme
   const fetchProducts = useCallback(async (isFirstPage = true) => {
+    // Loading kontrolü - önceki fetching işlemi devam ediyorsa yeni istek yapma
+    if (loading) {
+      console.log('Zaten yükleniyor, yeni istek engellendi');
+      return;
+    }
+    
+    if (!isOnline) {
+      setLoadingError('İnternet bağlantısı yok. Lütfen bağlantınızı kontrol edin.');
+      return;
+    }
+    
+    // Loading durumunu true olarak ayarla
     setLoading(true);
+    setLoadingError(null);
+    
+    // Zaman aşımı oluşturucu
+    let timeoutId: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error('Zaman aşımı')), 15000); // 15 saniye
+    });
+    
     try {
       let productsQuery;
       
@@ -76,10 +113,17 @@ function App() {
       } else {
         // Son sayfa zaten yüklenmişse işlemi durdur
         setLoading(false);
+        // Zaman aşımını iptal et
+        if (timeoutId) clearTimeout(timeoutId);
         return;
       }
       
-      const productsSnapshot = await getDocs(productsQuery);
+      // Zaman aşımı ile birlikte sorguyu çalıştır
+      const productsPromise = getDocs(productsQuery);
+      const productsSnapshot = await Promise.race([productsPromise, timeoutPromise]) as any;
+      
+      // Zaman aşımını iptal et
+      if (timeoutId) clearTimeout(timeoutId);
       
       // Son belgeyi sonraki sayfalama için saklayın
       const lastDoc = productsSnapshot.docs[productsSnapshot.docs.length - 1];
@@ -88,7 +132,7 @@ function App() {
       // Daha fazla sayfa var mı kontrol edin
       setHasMore(productsSnapshot.docs.length === pageSize);
       
-      const productsList = productsSnapshot.docs.map(doc => ({
+      const productsList = productsSnapshot.docs.map((doc: QueryDocumentSnapshot<DocumentData>) => ({
         id: doc.id,
         ...doc.data()
       })) as Product[];
@@ -102,14 +146,26 @@ function App() {
       }
     } catch (error) {
       console.error('Ürünleri yükleme hatası:', error);
-      alert('Ürünleri yüklerken bir hata oluştu. Lütfen tekrar deneyin.');
+      // Hata durumunda boş ürün listesi göster ve loading durumunu kapat
+      if (isFirstPage) {
+        setProducts([]);
+        setHasMore(false);
+      }
+      if ((error as Error).message === 'Zaman aşımı') {
+        setLoadingError('Veritabanı yanıt vermiyor. Lütfen internet bağlantınızı kontrol edin.');
+      } else {
+        setLoadingError('Ürünler yüklenirken bir hata oluştu.');
+      }
     } finally {
+      // İşlem bittiğinde loading durumunu kapat
       setLoading(false);
     }
-  }, [lastVisible, pageSize]);
+  }, [lastVisible, pageSize, isOnline]);
 
   // Ürün arama fonksiyonu
-  const searchProducts = async () => {
+  const searchProducts = useCallback(async () => {
+    if (loading) return; // Zaten yükleme yapılıyorsa işlemi durdur
+    
     if (!searchTerm.trim()) {
       // Arama terimi yoksa tüm ürünleri göster
       fetchProducts();
@@ -117,6 +173,8 @@ function App() {
     }
 
     setLoading(true);
+    setLoadingError(null);
+    
     try {
       // Arama teriminin küçük/büyük harf duyarlılığını azaltmak için
       const searchTermLower = searchTerm.toLowerCase();
@@ -126,7 +184,7 @@ function App() {
       const productsCollection = collection(db, 'products');
       const productsSnapshot = await getDocs(productsCollection);
       
-      const allProducts = productsSnapshot.docs.map(doc => ({
+      const allProducts = productsSnapshot.docs.map((doc: QueryDocumentSnapshot<DocumentData>) => ({
         id: doc.id,
         ...doc.data()
       })) as Product[];
@@ -143,18 +201,75 @@ function App() {
       setHasMore(false);
     } catch (error) {
       console.error('Ürün arama hatası:', error);
-      alert('Ürünleri ararken bir hata oluştu. Lütfen tekrar deneyin.');
+      // Hata durumunda boş liste göster
+      setProducts([]);
+      setHasMore(false);
+      setLoadingError('Ürünleri ararken bir hata oluştu.');
     } finally {
       setLoading(false);
     }
-  };
+  }, [searchTerm, loading, fetchProducts, db]);
 
   // Eğer giriş yapıldıysa ürünleri yükle
   useEffect(() => {
-    if (isLoggedIn) {
-      fetchProducts();
+    let isMounted = true;
+    let isLoading = false; // useEffect içinde yerel bir loading flag'i kullan
+    
+    // fetchProducts fonksiyonunun içinde başka bir async fonksiyon olarak tanımla
+    // React state döngülerinden kaçınmak için
+    const loadProducts = async () => {
+      if (isLoading || !isMounted || !isLoggedIn) return;
+      
+      isLoading = true;
+      console.log('Ürünler yükleniyor...');
+      
+      try {
+        const productsQuery = query(
+          collection(db, 'products'),
+          orderBy('createdAt', 'desc'),
+          limit(pageSize)
+        );
+        
+        const productsSnapshot = await getDocs(productsQuery);
+        
+        if (!isMounted) return; // Bileşen unmount edildiyse işlemi durdur
+        
+        // Son belgeyi sonraki sayfalama için saklayın
+        const lastDoc = productsSnapshot.docs[productsSnapshot.docs.length - 1];
+        setLastVisible(lastDoc || null);
+        
+        // Daha fazla sayfa var mı kontrol edin
+        setHasMore(productsSnapshot.docs.length === pageSize);
+        
+        const productsList = productsSnapshot.docs.map((doc: QueryDocumentSnapshot<DocumentData>) => ({
+          id: doc.id,
+          ...doc.data()
+        })) as Product[];
+        
+        // Ürünleri state'e set et
+        setProducts(productsList);
+      } catch (error) {
+        console.error('İlk yükleme hatası:', error);
+        if (isMounted) {
+          setProducts([]);
+          setHasMore(false);
+          setLoadingError('Ürünler yüklenirken bir hata oluştu.');
+        }
+      } finally {
+        if (isMounted) setLoading(false);
+        isLoading = false;
+      }
+    };
+    
+    // İlk yükleme işlemi için çağır
+    if (isLoggedIn && isMounted && !isLoading) {
+      loadProducts();
     }
-  }, [isLoggedIn, fetchProducts]);
+    
+    return () => {
+      isMounted = false;
+    };
+  }, [isLoggedIn, pageSize, db]);
 
   // Save login state to localStorage whenever it changes
   useEffect(() => {
@@ -193,11 +308,12 @@ function App() {
   };
 
   // Daha fazla ürün yükle
-  const handleLoadMore = () => {
+  const handleLoadMore = useCallback(() => {
     if (!loading && hasMore) {
+      console.log('Daha fazla ürün yükleniyor...');
       fetchProducts(false);
     }
-  };
+  }, [loading, hasMore, fetchProducts]);
 
   const handleAddProduct = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -499,7 +615,32 @@ function App() {
                 </div>
               </div>
 
-              {loading && <div className="loading-indicator">Yükleniyor...</div>}
+              {loading && (
+                <div className="loading-indicator">
+                  <span>Yükleniyor...</span>
+                </div>
+              )}
+              
+              {loadingError && (
+                <div className="error-message">
+                  <p>{loadingError}</p>
+                  <button 
+                    onClick={() => {
+                      setLoadingError(null);
+                      fetchProducts();
+                    }}
+                    className="retry-btn"
+                  >
+                    Tekrar Dene
+                  </button>
+                </div>
+              )}
+              
+              {!loading && !loadingError && products.length === 0 && (
+                <div className="empty-state">
+                  Ürün bulunamadı. Yeni bir ürün ekleyin veya Excel'den içe aktarın.
+                </div>
+              )}
 
               {showAddForm && (
                 <div className="form-container">
