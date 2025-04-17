@@ -31,6 +31,7 @@ function App() {
   const [error, setError] = useState('');
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingError, setLoadingError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [showAddForm, setShowAddForm] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
@@ -52,11 +53,39 @@ function App() {
   const ADMIN_USERNAME = 'kasi0101';
   const ADMIN_PASSWORD = 'kasi0147';
 
+  // Internet bağlantısı kontrolü
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
   // Firestore'dan ilk sayfa ürünleri yükleme
   const fetchProducts = useCallback(async (isFirstPage = true) => {
     if (loading) return; // Zaten yükleme yapılıyorsa işlemi durdur
     
+    if (!isOnline) {
+      setLoadingError('İnternet bağlantısı yok. Lütfen bağlantınızı kontrol edin.');
+      return;
+    }
+    
     setLoading(true);
+    setLoadingError(null);
+    
+    // Zaman aşımı oluşturucu
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Zaman aşımı')), 15000); // 15 saniye
+    });
+    
     try {
       let productsQuery;
       
@@ -81,7 +110,9 @@ function App() {
         return;
       }
       
-      const productsSnapshot = await getDocs(productsQuery);
+      // Zaman aşımı ile birlikte sorguyu çalıştır
+      const productsPromise = getDocs(productsQuery);
+      const productsSnapshot = await Promise.race([productsPromise, timeoutPromise]) as any;
       
       // Son belgeyi sonraki sayfalama için saklayın
       const lastDoc = productsSnapshot.docs[productsSnapshot.docs.length - 1];
@@ -90,7 +121,7 @@ function App() {
       // Daha fazla sayfa var mı kontrol edin
       setHasMore(productsSnapshot.docs.length === pageSize);
       
-      const productsList = productsSnapshot.docs.map(doc => ({
+      const productsList = productsSnapshot.docs.map((doc: QueryDocumentSnapshot<DocumentData>) => ({
         id: doc.id,
         ...doc.data()
       })) as Product[];
@@ -109,10 +140,15 @@ function App() {
         setProducts([]);
         setHasMore(false);
       }
+      if ((error as Error).message === 'Zaman aşımı') {
+        setLoadingError('Veritabanı yanıt vermiyor. Lütfen internet bağlantınızı kontrol edin.');
+      } else {
+        setLoadingError('Ürünler yüklenirken bir hata oluştu.');
+      }
     } finally {
       setLoading(false);
     }
-  }, [lastVisible, pageSize, loading]);
+  }, [lastVisible, pageSize, loading, isOnline]);
 
   // Ürün arama fonksiyonu
   const searchProducts = async () => {
@@ -162,9 +198,28 @@ function App() {
   // Eğer giriş yapıldıysa ürünleri yükle
   useEffect(() => {
     let isMounted = true;
+    let loadAttempts = 0;
+    const maxAttempts = 3;
+    
+    const attemptLoad = async () => {
+      if (!isLoggedIn || !isMounted || loadAttempts >= maxAttempts) return;
+      
+      try {
+        await fetchProducts();
+      } catch (error) {
+        console.error('Yükleme hatası:', error);
+        loadAttempts++;
+        if (loadAttempts < maxAttempts) {
+          // Yeniden deneme aralığını artır (exponential backoff)
+          setTimeout(attemptLoad, 1000 * Math.pow(2, loadAttempts));
+        } else {
+          setLoadingError('Ürünler yüklenemedi. Lütfen sayfayı yenileyin.');
+        }
+      }
+    };
     
     if (isLoggedIn && isMounted) {
-      fetchProducts();
+      attemptLoad();
     }
     
     return () => {
@@ -516,6 +571,10 @@ function App() {
               </div>
 
               {loading && <div className="loading-indicator">Yükleniyor...</div>}
+              {loadingError && <div className="error-message">{loadingError}</div>}
+              {!loading && !loadingError && products.length === 0 && (
+                <div className="empty-state">Ürün bulunamadı. Yeni bir ürün ekleyin veya Excel'den içe aktarın.</div>
+              )}
 
               {showAddForm && (
                 <div className="form-container">
