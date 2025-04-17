@@ -1,0 +1,9 @@
+[build]
+  command = "CI=false npm run build"
+  publish = "build"
+
+# Handle single-page application routing
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200 
