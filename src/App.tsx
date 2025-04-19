@@ -20,6 +20,14 @@ interface Product {
   updatedAt?: Date;
 }
 
+// Stok sayım ürünleri için interface
+interface StockCountItem {
+  barcode: string;
+  quantity: number;
+  name?: string;
+  price?: number;
+}
+
 function App() {
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(() => {
     // localStorage'dan giriş durumunu kontrol et
@@ -35,6 +43,13 @@ function App() {
   const [searchTerm, setSearchTerm] = useState('');
   const [showAddForm, setShowAddForm] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  
+  // Stok sayımı için state değişkenleri
+  const [showStockCount, setShowStockCount] = useState(false);
+  const [stockItems, setStockItems] = useState<StockCountItem[]>([]);
+  const [barcodeInput, setBarcodeInput] = useState('');
+  const [quantityInput, setQuantityInput] = useState(1);
+  const [stockCountSuccess, setStockCountSuccess] = useState<string | null>(null);
   
   // Sayfalama için state değişkenleri
   const [lastVisible, setLastVisible] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
@@ -563,6 +578,145 @@ function App() {
     document.body.removeChild(link);
   };
 
+  // Stok sayım işlemleri
+  const handleBarcodeSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    if (!barcodeInput.trim()) return;
+    
+    // Barkod için mevcut ürünü kontrol et
+    const existingItemIndex = stockItems.findIndex(item => item.barcode === barcodeInput);
+    
+    if (existingItemIndex >= 0) {
+      // Mevcut ürünün miktarını artır
+      const updatedItems = [...stockItems];
+      updatedItems[existingItemIndex].quantity += quantityInput;
+      setStockItems(updatedItems);
+    } else {
+      // Yeni ürün ekle
+      setStockItems([...stockItems, {
+        barcode: barcodeInput,
+        quantity: quantityInput
+      }]);
+    }
+    
+    // Stok sayım başarılı mesajı göster
+    setStockCountSuccess(`Barkod ${barcodeInput} eklendi: ${quantityInput} adet`);
+    
+    // Timeout ile mesajı kaldır
+    setTimeout(() => {
+      setStockCountSuccess(null);
+    }, 2000);
+    
+    // Inputları sıfırla
+    setBarcodeInput('');
+    setQuantityInput(1);
+    
+    // Otomatik olarak barkod input alanına odaklan
+    const barcodeInputEl = document.getElementById('barcode-input');
+    if (barcodeInputEl) {
+      barcodeInputEl.focus();
+    }
+  };
+  
+  // Stok sayımından ürün sil
+  const handleRemoveStockItem = (barcode: string) => {
+    setStockItems(stockItems.filter(item => item.barcode !== barcode));
+  };
+  
+  // Stok sayım verilerini kaydet
+  const handleSaveStockCount = async () => {
+    if (stockItems.length === 0) {
+      alert('Kaydetmek için en az bir ürün ekleyin.');
+      return;
+    }
+    
+    setLoading(true);
+    
+    try {
+      // Toplu işlem oluştur
+      const batch = writeBatch(db);
+      let addedCount = 0;
+      
+      // Her ürün için
+      for (const item of stockItems) {
+        // Mevcut ürünü kontrol et
+        const existingProduct = products.find(p => p.barcode === item.barcode);
+        
+        if (existingProduct) {
+          // Mevcut ürünün stoğunu güncelle
+          const productRef = doc(db, 'products', existingProduct.id);
+          batch.update(productRef, {
+            stock: item.quantity,
+            updatedAt: new Date()
+          });
+        } else {
+          // Yeni ürün oluştur (isim ve fiyat boş)
+          const newProductRef = doc(collection(db, 'products'));
+          batch.set(newProductRef, {
+            barcode: item.barcode,
+            name: '',
+            stock: item.quantity,
+            price: 0,
+            createdAt: new Date()
+          });
+        }
+        
+        addedCount++;
+      }
+      
+      // Batch işlemini gerçekleştir
+      await batch.commit();
+      
+      // Başarılı mesajı göster
+      alert(`${addedCount} ürün başarıyla kaydedildi.`);
+      
+      // Stok sayımı sıfırla
+      setStockItems([]);
+      
+      // Ürün listesini güncelle
+      fetchProducts();
+      
+      // Stok sayım modunu kapat
+      setShowStockCount(false);
+    } catch (error) {
+      console.error('Stok kaydetme hatası:', error);
+      alert('Stok kaydedilirken bir hata oluştu. Lütfen tekrar deneyin.');
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  // Stok sayım CSV dışa aktarma
+  const handleExportStockCSV = () => {
+    if (stockItems.length === 0) {
+      alert('Dışa aktarmak için en az bir ürün ekleyin.');
+      return;
+    }
+    
+    // Stok sayım öğelerini CSV formatına dönüştür
+    const headers = ['Barkod', 'Miktar'];
+    const csvRows = [
+      headers.join(','),
+      ...stockItems.map(item => `${item.barcode},${item.quantity}`)
+    ];
+    
+    // BOM karakterini ekle (UTF-8 encoding)
+    const BOM = '\uFEFF';
+    const csvContent = BOM + csvRows.join('\n');
+    
+    // CSV dosyasını indir
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `stok_sayim_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   if (isLoggedIn) {
     return (
       <div className="App">
@@ -582,8 +736,27 @@ function App() {
                   setEditingProduct(null);
                   setNewProduct({ barcode: '', name: '', stock: 0, price: 0 });
                   setShowAddForm(true);
+                  setShowStockCount(false);
                 }} className="add-btn">
                   Yeni Ürün Ekle
+                </button>
+                
+                <button onClick={() => {
+                  setShowStockCount(!showStockCount);
+                  setShowAddForm(false);
+                  setBarcodeInput('');
+                  setQuantityInput(1);
+                  // Barkod okuyucu modunu açtığında otomatik olarak odaklan
+                  if (!showStockCount) {
+                    setTimeout(() => {
+                      const barcodeInputEl = document.getElementById('barcode-input');
+                      if (barcodeInputEl) {
+                        barcodeInputEl.focus();
+                      }
+                    }, 100);
+                  }
+                }} className={`stock-count-btn ${showStockCount ? 'active' : ''}`}>
+                  {showStockCount ? 'Stok Sayımı Kapat' : 'Stok Sayımı Aç'}
                 </button>
                 
                 <div className="import-container">
@@ -636,7 +809,106 @@ function App() {
                 </div>
               )}
               
-              {!loading && !loadingError && products.length === 0 && (
+              {/* Stok Sayım Modülü */}
+              {showStockCount && (
+                <div className="stock-count-container">
+                  <h2>Stok Sayım Modülü</h2>
+                  <p className="stock-count-info">
+                    Barkod okuyucu ile ürünleri okutun. Aynı barkodlu ürünler otomatik olarak toplanacaktır.
+                  </p>
+                  
+                  <form onSubmit={handleBarcodeSubmit} className="barcode-form">
+                    <div className="form-group">
+                      <label htmlFor="barcode-input">Barkod</label>
+                      <input
+                        type="text"
+                        id="barcode-input"
+                        value={barcodeInput}
+                        onChange={(e) => setBarcodeInput(e.target.value)}
+                        placeholder="Barkod numarası..."
+                        autoComplete="off"
+                        autoFocus
+                        required
+                      />
+                    </div>
+                    
+                    <div className="form-group">
+                      <label htmlFor="quantity-input">Adet</label>
+                      <input
+                        type="number"
+                        id="quantity-input"
+                        value={quantityInput}
+                        onChange={(e) => setQuantityInput(parseInt(e.target.value) || 1)}
+                        min="1"
+                        required
+                      />
+                    </div>
+                    
+                    <button type="submit" className="add-barcode-btn">Ekle</button>
+                  </form>
+                  
+                  {stockCountSuccess && (
+                    <div className="success-message">{stockCountSuccess}</div>
+                  )}
+                  
+                  {stockItems.length > 0 ? (
+                    <>
+                      <div className="stock-items-list">
+                        <h3>Eklenen Ürünler ({stockItems.length})</h3>
+                        <div className="stock-list-header">
+                          <span>Barkod</span>
+                          <span>Adet</span>
+                          <span>İşlem</span>
+                        </div>
+                        {stockItems.map((item) => (
+                          <div key={item.barcode} className="stock-item">
+                            <span className="stock-barcode">{item.barcode}</span>
+                            <span className="stock-quantity">{item.quantity}</span>
+                            <button 
+                              onClick={() => handleRemoveStockItem(item.barcode)}
+                              className="stock-remove-btn"
+                            >
+                              Sil
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      
+                      <div className="stock-actions">
+                        <button 
+                          onClick={handleSaveStockCount} 
+                          className="save-stock-btn"
+                          disabled={loading}
+                        >
+                          Kaydet
+                        </button>
+                        <button 
+                          onClick={handleExportStockCSV}
+                          className="export-stock-btn"
+                        >
+                          CSV Olarak İndir
+                        </button>
+                        <button 
+                          onClick={() => {
+                            if (window.confirm('Tüm eklenen ürünleri silmek istediğinize emin misiniz?')) {
+                              setStockItems([]);
+                            }
+                          }}
+                          className="clear-stock-btn"
+                        >
+                          Tümünü Temizle
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="empty-stock-items">
+                      Henüz ürün eklenmedi. Barkod okutmaya başlayın.
+                    </div>
+                  )}
+                </div>
+              )}
+              
+              {!loading && !loadingError && products.length === 0 && !showStockCount && (
                 <div className="empty-state">
                   Ürün bulunamadı. Yeni bir ürün ekleyin veya Excel'den içe aktarın.
                 </div>
